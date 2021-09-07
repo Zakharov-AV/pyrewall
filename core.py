@@ -7,19 +7,19 @@ class MODULE_ERROR(Enum):
     INVALID_VALUE = 2
 
 
-def __is_parent(object_type, parent_type) -> bool:
-    if object_type in set((parent_type, object,)):
+def is_parent(object_type, parent_type) -> bool:
+    if object_type in (parent_type, object,):
         return object_type == parent_type
     else:
         for parent in object_type.__bases__:
-            if __is_parent(object_type=parent, parent_type=parent_type):
+            if is_parent(object_type=parent, parent_type=parent_type):
                 return True
         return False
 
 
 class Module(object):
 
-    def __init__(self, *args, invert: bool = False,) -> None:
+    def __init__(self, *args, invert: bool = False, ) -> None:
         super().__init__()
         self._invert = invert
         self._items = list()
@@ -61,7 +61,7 @@ class Module(object):
             return __items
 
     def export(self, export_method):
-        return export_method(data={'class': type(self).__name__, 'invert': self._invert, 'items': self.value, })
+        return export_method(data={type(self).__name__: {'invert': self._invert, 'items': self._items, }})
 
     @property
     def last_error(self) -> MODULE_ERROR:
@@ -80,20 +80,31 @@ class Module(object):
         self._invert = value
 
 
-class Target(object):
+class Action(object):
+
+    def export(self, export_method):
+        return export_method(data={type(self).__name__: {}})
+
+    def __str__(self):
+        return type(self).__name__
 
     @property
-    def value(self) -> dict:
-        return {'name': type(self).__name__.upper(), 'options': None, }
+    def value(self):
+        return self.__str__()
+
+
+class Chain(object):
+    pass
 
 
 class Protocol(Module):
 
-    def check_value(self, value: str) -> MODULE_ERROR:
+    def check_value(self, value: str = 'tcp') -> MODULE_ERROR:
 
         def __proto_exists(proto: str) -> bool:
             with open(file='/etc/protocols', mode='r') as f:
-                return proto not in ([i.split()[0].lower() for i in f.readlines() if i.strip() and i.lower().find('ipv6') == -1 and i.split()[0] != '#'] + ['any', ])
+                return proto in ([i.split()[0].lower() for i in f.readlines() if
+                                      i.strip() and i.lower().find('ipv6') == -1 and i.split()[0] != '#'] + ['any', ])
 
         self._error = super().check_value(value)
         if self._error == MODULE_ERROR.NO_ERRORS:
@@ -111,24 +122,24 @@ class HostIpNetwork(Module):
     def check_value(self, value: str) -> MODULE_ERROR:
 
         def __is_ipv4(ip_address: str) -> bool:
-            from ipaddress import IPv4Interface
+            from ipaddress import IPv4Interface, AddressValueError
             try:
                 IPv4Interface(ip_address)
                 return True
-            except:
+            except AddressValueError:
                 return False
 
         def __is_hostname(hostname: str) -> bool:
-            from socket import gethostbyname
+            from socket import gethostbyname, gaierror
             try:
                 gethostbyname(hostname)
                 return True
-            except:
+            except gaierror:
                 return False
 
         self._error = super().check_value(value)
         if self._error == MODULE_ERROR.NO_ERRORS:
-            if not (__is_ipv4(ip_address=value) and __is_hostname(hostname=value)):
+            if not (__is_ipv4(ip_address=value) or __is_hostname(hostname=value)):
                 self._error = MODULE_ERROR.INVALID_VALUE
 
         return self._error
@@ -184,7 +195,7 @@ class Modules(object):
         return None
 
     def __setitem__(self, key, value: str) -> None:
-        if __is_parent(object_type=key, parent_type=Module):
+        if is_parent(object_type=key, parent_type=Module):
             __new = self[key]
             if not __new:
                 __new = key()
@@ -198,16 +209,33 @@ class Modules(object):
         return self.__items
 
 
-class Accept(Target):
+class Accept(Action):
     pass
 
 
-class Drop(Target):
+class Drop(Action):
     pass
 
 
-class Return(Target):
+class Return(Action):
     pass
+
+
+class GoTo(Action):
+
+    def __init__(self, value: Chain, need_return: bool = True):
+        super().__init__(self)
+        self.__return = need_return
+        self.__value = value
+
+    def __set__(self, instance, value: Chain):
+        self.__value = value
+
+    def __str__(self):
+        return self.value
+
+    def export(self, export_method):
+        return export_method(data={type(self).__name__: {'return': self.__return, 'value': self.value}})
 
 
 class Rule(object):
@@ -215,3 +243,21 @@ class Rule(object):
     def __init__(self) -> None:
         super().__init__()
         self.modules = Modules()
+        self.action = Accept()
+
+    def export(self, export_method):
+        __export = export_method(dict())
+        if type(__export) == dict:
+            for __item in self.modules.items:
+                __export.update(__item.export(export_method))
+            __export.update(self.action.export(export_method))
+        elif type(__export) == list:
+            __export = [i.export(export_method) for i in self.modules.items]
+            __export.append(self.action.export(export_method))
+        elif type(__export) == str:
+            __export = " ".join([i.export(export_method) for i in self.modules.items if i.value])
+            __export += " " + self.action.export(export_method)
+        else:
+            return None
+
+        return __export.strip()
